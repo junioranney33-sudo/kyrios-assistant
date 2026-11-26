@@ -1,4 +1,12 @@
+"""
+Kyrios AI Telegram Bot
+Python 3.10+
+Features: AI chat, /ask, /reset, /help, /whoami, /start, conversational memory per chat.
+"""
+
 import os
+import logging
+from collections import defaultdict, deque
 
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -11,465 +19,304 @@ from telegram.ext import (
 
 from google import genai
 
-
-# =============================
+# =========================
 # CONFIGURATION
-# =============================
+# =========================
 
-TOKEN = os.getenv("BOT_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-gemini_client = genai.Client(
-    api_key=os.getenv("GEMINI_API_KEY")
+MODEL = "gemini-2.5-flash"
+
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=logging.INFO,
 )
 
-mode_note = False
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logger = logging.getLogger("kyrios_bot")
 
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable.")
 
-# =============================
+if not GEMINI_API_KEY:
+    raise RuntimeError("Missing GEMINI_API_KEY environment variable.")
+
+client = genai.Client(api_key=GEMINI_API_KEY)
+
+# =========================
+# MÉMOIRE
+# =========================
+
+CHAT_HISTORY = defaultdict(lambda: deque(maxlen=16))
+
+# =========================
+# PROMPT SYSTÈME
+# =========================
+
+SYSTEM_PROMPT = """
+Tu es Kyrios, un assistant IA utile, clair et respectueux.
+
+Réponds en français par défaut, mais utilise la langue demandée.
+
+Aide à :
+- rédiger
+- expliquer
+- traduire
+- résumer
+- programmer
+- organiser
+- calculer
+
+Sois honnête.
+N'invente jamais les faits.
+Ne prétends pas avoir effectué une action que tu n'as pas réalisée.
+"""
+
+# =========================
+# CLAVIER
+# =========================
+
+KEYBOARD = ReplyKeyboardMarkup(
+    [
+        ["🤖 Parler à l'IA", "🧠 Aide"],
+        ["✍️ Rédiger", "🌍 Traduire"],
+        ["📊 Calculer", "🔄 Réinitialiser"],
+    ],
+    resize_keyboard=True,
+)
+
+# =========================
+# OUTILS
+# =========================
+
+def get_chat_key(update: Update) -> int:
+    return update.effective_chat.id
+
+# =========================
+# COMMANDES
+# =========================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(
+        "✅ Kyrios AI est lancé !\n\n"
+        "Écris simplement ta question ou utilise /ask.\n"
+        "Commandes : /help, /ask, /reset, /whoami",
+        reply_markup=KEYBOARD,
+    )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(
+        "📘 Commandes Kyrios AI\n"
+        "/start — démarrer le bot\n"
+        "/help — afficher l'aide\n"
+        "/ask ta question — poser une question à l'IA\n"
+        "/reset — effacer la mémoire récente\n"
+        "/whoami — afficher ton identifiant Telegram\n\n"
+        "Tu peux aussi envoyer directement un message normal.",
+        reply_markup=KEYBOARD,
+    )
+
+async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    await update.effective_message.reply_text(
+        f"Ton identifiant Telegram est : {user.id}"
+    )
+
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    CHAT_HISTORY.pop(get_chat_key(update), None)
+
+    await update.effective_message.reply_text(
+        "🧹 Mémoire récente réinitialisée."
+    )
+
+# =========================
 # GEMINI
-# =============================
-import asyncio
+# =========================
 
-async def ask_gemini(question):
-    for tentative in range(3):
-        try:
-            response = gemini_client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=question
-            )
+async def ask_ai(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str):
 
-            return response.text
+    prompt = (prompt or "").strip()
 
-        except Exception as e:
-            erreur = str(e)
+    if not prompt:
+        await update.effective_message.reply_text(
+            "Écris ta question après /ask ou envoie un message."
+        )
+        return
 
-            if "503" in erreur:
-                await asyncio.sleep(5)
-                continue
+    msg = await update.effective_message.reply_text(
+        "⏳ Kyrios réfléchit..."
+    )
 
-            return f"❌ Erreur Gemini : {erreur}"   return "⏳ Gemini est actuellement surchargé. Réessaie dans quelques minutes."
+    key = get_chat_key(update)
 
-contents=f"""
-Tu es Kyrios Assistant.
+    history = list(CHAT_HISTORY[key])
 
-contents=f"""
-Tu es Kyrios Assistant.
+    try:
 
-Tu es l'assistant personnel de Junior.
+        history_text = ""
 
-Tu aides dans :
-- Python
-- IA
-- Développement personnel
-- Productivité
+        for item in history:
+            history_text += f"{item['role']} : {item['content']}\n"
 
-Question :
-{question}
-"""
+        full_prompt = f"""
+{SYSTEM_PROMPT}
 
-Réponds en français.
+Historique :
+
+{history_text}
 
 Question :
 
-{question}
+{prompt}
 """
+
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=full_prompt
         )
 
-        return response.text
+        answer = response.text.strip()
 
-    except Exception as e:
+        if not answer:
+            answer = (
+                "Je n'ai pas pu produire de réponse. "
+                "Essaie de reformuler."
+            )
 
-        return f"❌ Erreur Gemini : {e}"
+        CHAT_HISTORY[key].append(
+            {
+                "role": "user",
+                "content": prompt
+            }
+        )
 
+        CHAT_HISTORY[key].append(
+            {
+                "role": "assistant",
+                "content": answer
+            }
+        )
 
-# =============================
-# START
-# =============================
+        try:
+            await msg.delete()
+        except Exception:
+            pass
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+        for i in range(0, len(answer), 3900):
+            await update.effective_message.reply_text(
+                answer[i:i + 3900]
+            )
 
-    keyboard = [
-        ["👤 Junior"],
-        ["⚽ Analyse Match", "💰 Revenus"],
-        ["📊 Bankroll", "🎯 Objectifs"],
-        ["🧠 Défi Social", "📚 Apprendre"],
-        ["📝 Notes", "📖 Mes Notes"],
-        ["📈 Bilan", "⚙️ Paramètres"],
-        ["🗑️ Effacer Notes", "ℹ️ Aide"]
-    ]
+    except Exception as exc:
 
-    reply_markup = ReplyKeyboardMarkup(
-        keyboard,
-        resize_keyboard=True
-    )
+        logger.exception("Gemini request failed")
 
-    await update.message.reply_text(
-        """
-🤖 KYRIOS ASSISTANT V2
+        try:
+            await msg.edit_text(
+                "⚠️ Une erreur est survenue avec Gemini.\n"
+                "Vérifie la clé API Gemini ou réessaie plus tard."
+            )
+        except Exception:
+            pass
 
-Salut Junior !
+# =========================
+# /ASK
+# =========================
 
-Je suis ton assistant personnel intelligent.
+async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    prompt = " ".join(context.args).strip()
 
-✅ Analyse sportive
-✅ Gestion bankroll
-✅ Revenus
-✅ Développement personnel
-✅ Python
-✅ Intelligence artificielle
-✅ Notes personnelles
+    await ask_ai(update, context, prompt)
 
-Choisis une option :
-""",
-        reply_markup=reply_markup
-    )
-
-
-# =============================
+# =========================
 # MESSAGES
-# =============================
+# =========================
 
-async def handle_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    global mode_note
+    text = (update.effective_message.text or "").strip()
 
-    text = update.message.text
+    if text == "🧠 Aide":
+        await help_command(update, context)
+        return
 
-    # =========================
-    # PROFIL
-    # =========================
+    if text == "🔄 Réinitialiser":
+        await reset(update, context)
+        return
 
-    if text == "👤 Junior":
-
-        await update.message.reply_text(
-            """
-👤 PROFIL JUNIOR
-
-🏠 Ville : Abidjan
-
-🤖 Assistant :
-Kyrios V2
-
-🎯 Objectifs :
-
-✅ Développement personnel
-✅ Paris sportifs
-✅ Revenus en ligne
-✅ Python
-✅ IA
-"""
+    if text == "✍️ Rédiger":
+        await update.effective_message.reply_text(
+            "Dis-moi quel texte tu veux rédiger."
         )
+        return
 
-    # =========================
-    # MATCH
-    # =========================
-
-    elif text == "⚽ Analyse Match":
-
-        await update.message.reply_text(
-            """
-⚽ Analyse Match
-
-Envoie le match.
-
-Exemple :
-
-ASEC vs Africa Sports
-"""
+    if text == "🌍 Traduire":
+        await update.effective_message.reply_text(
+            "Envoie le texte et indique la langue cible."
         )
+        return
 
-    # =========================
-    # REVENUS
-    # =========================
-
-    elif text == "💰 Revenus":
-
-        await update.message.reply_text(
-            """
-💰 Revenus
-
-✅ Freelance
-✅ Affiliation
-✅ TikTok
-✅ Services IA
-✅ Vente de services locaux
-"""
+    if text == "📊 Calculer":
+        await update.effective_message.reply_text(
+            "Envoie ton calcul."
         )
+        return
 
-    # =========================
-    # BANKROLL
-    # =========================
-
-    elif text == "📊 Bankroll":
-
-        await update.message.reply_text(
-            """
-📊 Gestion Bankroll
-
-✅ Ajouter dépôt
-
-✅ Ajouter pari
-
-✅ Statistiques
-
-(Fonction avancée bientôt)
-"""
+    if text == "🤖 Parler à l'IA":
+        await update.effective_message.reply_text(
+            "Je t'écoute 👌"
         )
+        return
 
-    # =========================
-    # OBJECTIFS
-    # =========================
+    await ask_ai(update, context, text)
 
-    elif text == "🎯 Objectifs":
+# =========================
+# ERREURS
+# =========================
 
-        await update.message.reply_text(
-            """
-🎯 Objectifs du jour
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.exception(
+        "Unhandled bot error",
+        exc_info=context.error
+    )
 
-✅ Python 30 min
-
-✅ Lire 10 pages
-
-✅ Parler à une nouvelle personne
-"""
-        )
-
-    # =========================
-    # DEFI SOCIAL
-    # =========================
-
-    elif text == "🧠 Défi Social":
-
-        await update.message.reply_text(
-            """
-🧠 Défi du jour
-
-Parle à une nouvelle personne.
-
-Objectifs :
-
-✅ Dire bonjour
-
-✅ Poser une question
-
-✅ Écouter attentivement
-"""
-        )
-
-    # =========================
-    # APPRENDRE
-    # =========================
-
-    elif text == "📚 Apprendre":
-
-        await update.message.reply_text(
-            """
-📚 Sujets disponibles
-
-🐍 Python
-
-🤖 IA
-
-⚽ Paris sportifs
-
-💰 Revenus
-"""
-        )
-
-    # =========================
-    # NOTES
-    # =========================
-
-    elif text == "📝 Notes":
-
-        mode_note = True
-
-        await update.message.reply_text(
-            "📝 Écris ta note."
-        )
-
-    # =========================
-    # MES NOTES
-    # =========================
-
-    elif text == "📖 Mes Notes":
-
-        try:
-
-            with open(
-                "notes.txt",
-                "r",
-                encoding="utf-8"
-            ) as f:
-
-                notes = f.read()
-
-            if notes.strip() == "":
-                raise Exception()
-
-            await update.message.reply_text(
-                f"📖 TES NOTES\n\n{notes}"
-            )
-
-        except:
-
-            await update.message.reply_text(
-                "📭 Aucune note enregistrée."
-            )
-
-    # =========================
-    # EFFACER NOTES
-    # =========================
-
-    elif text == "🗑️ Effacer Notes":
-
-        open(
-            "notes.txt",
-            "w",
-            encoding="utf-8"
-        ).close()
-
-        await update.message.reply_text(
-            "✅ Notes supprimées."
-        )
-
-    # =========================
-    # BILAN
-    # =========================
-
-    elif text == "📈 Bilan":
-
-        await update.message.reply_text(
-            """
-📈 BILAN
-
-✅ Bot actif
-
-✅ Notes disponibles
-
-✅ Assistant opérationnel
-
-✅ Gemini intégré
-"""
-        )
-
-    # =========================
-    # PARAMETRES
-    # =========================
-
-    elif text == "⚙️ Paramètres":
-
-        await update.message.reply_text(
-            """
-⚙️ PARAMÈTRES
-
-Version : V2
-
-Statut : En ligne
-"""
-        )
-
-    # =========================
-    # AIDE
-    # =========================
-
-    elif text == "ℹ️ Aide":
-
-        await update.message.reply_text(
-            """
-ℹ️ AIDE
-
-/start
-Menu principal
-
-Utilise les boutons ci-dessous.
-"""
-        )
-
-    # =========================
-    # SALUTATIONS
-    # =========================
-
-    elif text.lower() in [
-        "salut",
-        "bonjour",
-        "hello"
-    ]:
-
-        await update.message.reply_text(
-            """
-👋 Salut Junior !
-
-Heureux de te revoir.
-"""
-        )
-
-    # =========================
-    # ENREGISTRER NOTE
-    # =========================
-
-    elif mode_note:
-
-        with open(
-            "notes.txt",
-            "a",
-            encoding="utf-8"
-        ) as f:
-
-            f.write(text + "\n")
-
-        mode_note = False
-
-        await update.message.reply_text(
-            f"✅ Note enregistrée :\n\n{text}"
-        )
-
-    # =========================
-    # GEMINI
-    # =========================
-
-    else:
-
-        await update.message.reply_text(
-            "🤖 Réflexion..."
-        )
-
-        reponse = await ask_gemini(text)
-
-        if len(reponse) > 4000:
-            reponse = reponse[:4000]
-
-        await update.message.reply_text(
-            reponse
-        )
-
-
-# =============================
+# =========================
 # MAIN
-# =============================
+# =========================
 
-print("🚀 KYRIOS ASSISTANT V2 LANCÉ")
+def main():
 
-app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(
+        TELEGRAM_TOKEN
+    ).build()
 
-app.add_handler(
-    CommandHandler(
-        "start",
-        start
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("ask", ask_command))
+    app.add_handler(CommandHandler("reset", reset))
+    app.add_handler(CommandHandler("whoami", whoami))
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            message_handler
+        )
     )
-)
 
-app.add_handler(
-    MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        handle_message
+    app.add_error_handler(error_handler)
+
+    logger.info("🚀 Kyrios AI démarre...")
+
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES
     )
-)
 
-app.run_polling()
+if __name__ == "__main__":
+    main()
+
+
+    
+
+   
