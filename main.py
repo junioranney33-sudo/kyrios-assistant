@@ -47,23 +47,25 @@ async def ask_gemini(question):
                 await asyncio.sleep(5)
                 continue
 
-            return f"❌ Erreur Gemini : {erreur}"
+            return f"❌ Erreur Gemini : {erreur}"   return "⏳ Gemini est actuellement surchargé. Réessaie dans quelques minutes."
 
-    return "⏳ Gemini est actuellement surchargé. Réessaie dans quelques minutes."
+contents=f"""
+Tu es Kyrios Assistant.
+
+contents=f"""
 Tu es Kyrios Assistant.
 
 Tu es l'assistant personnel de Junior.
 
 Tu aides dans :
-
 - Python
 - IA
 - Développement personnel
 - Productivité
-- Organisation
-- Revenus en ligne
-- Motivation
-- Apprentissage
+
+Question :
+{question}
+"""
 
 Réponds en français.
 
