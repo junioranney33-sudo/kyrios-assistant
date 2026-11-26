@@ -28,14 +28,28 @@ mode_note = False
 # =============================
 # GEMINI
 # =============================
+import asyncio
 
 async def ask_gemini(question):
+    for tentative in range(3):
+        try:
+            response = gemini_client.models.generate_content(
+                model="gemini-3.8-flash",
+                contents=question
+            )
 
-    try:
+            return response.text
 
-        response = gemini_client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=f"""
+        except Exception as e:
+            erreur = str(e)
+
+            if "503" in erreur:
+                await asyncio.sleep(5)
+                continue
+
+            return f"❌ Erreur Gemini : {erreur}"
+
+    return "⏳ Gemini est actuellement surchargé. Réessaie dans quelques minutes."
 Tu es Kyrios Assistant.
 
 Tu es l'assistant personnel de Junior.
