@@ -26,7 +26,7 @@ from google import genai
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-2.0-flash"
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
